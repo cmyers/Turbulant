@@ -21,8 +21,12 @@ TurbulantAudioProcessor::TurbulantAudioProcessor()
                      #endif
                        )
 #endif
+, state(*this, nullptr, "STATE", {
+        std::make_unique<juce::AudioParameterFloat> ("gain", "Gain", 0.0f, 1.0f, 1.0f),
+        std::make_unique<juce::AudioParameterFloat> ("feedback", "Delay Feedback", 0.0f, 1.0f, 0.35f),
+        std::make_unique<juce::AudioParameterFloat> ("mix", "Dry / Wet", 0.0f, 1.0f, 0.5f)
+    })
 {
-	addParameter(new juce::AudioParameterFloat("gain", "Gain", 0.0f, 1.0f, 1.5f));
 }
 
 TurbulantAudioProcessor::~TurbulantAudioProcessor()
@@ -96,6 +100,12 @@ void TurbulantAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
 {
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
+
+    int delayMilliseconds = 200;
+    auto delaySamples = (int)std::round(sampleRate * delayMilliseconds / 1000.0);
+    delayBuffer.setSize(2, delaySamples);
+    delayBuffer.clear();
+    delayBufferPos = 0;
 }
 
 void TurbulantAudioProcessor::releaseResources()
@@ -130,10 +140,10 @@ bool TurbulantAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts
 }
 #endif
 
-void TurbulantAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+void TurbulantAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
+    auto totalNumInputChannels = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
     // In case we have more outputs than inputs, this code clears any output
@@ -143,7 +153,7 @@ void TurbulantAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     // when they first compile a plugin, but obviously you don't need to keep
     // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+        buffer.clear(i, 0, buffer.getNumSamples());
 
     // This is the place where you'd normally do the guts of your plugin's
     // audio processing...
@@ -151,36 +161,41 @@ void TurbulantAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     // the samples and the outer loop is handling the channels.
     // Alternatively, you can process the samples with the channels
     // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
 
-        // ..do something to the data...
-    }
+    float gain = state.getParameter("gain")->getValue();
+    float feedback = state.getParameter("feedback")->getValue();
+    float mix = state.getParameter("mix")->getValue();
 
-    /*juce::dsp::AudioBlock<float> block(buffer);
-
-    for (int channel = 0; channel < block.getNumChannels(); ++channel)
-    {
-        auto* channelData = block.getChannelPointer(channel);
-        for (int sample = 0; sample < block.getNumSamples(); ++sample)
-        {
-            channelData[sample] *= 4.0;
-        }
-    }*/
-
-    juce::AudioProcessorParameter * gainParameter = getParameters()[0];
-    float gain = gainParameter->getValue();
+	int delayBufferSize = delayBuffer.getNumSamples();
 
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
+
         float* channelData = buffer.getWritePointer(channel);
+        int delayPos = delayBufferPos;
 
         for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
+
+            float drySample = channelData[i];
+
+            float delaySample = delayBuffer.getSample(channel, delayPos) * feedback;
+            delayBuffer.setSample(channel, delayPos, drySample + delaySample);
+
+            delayPos++;
+            if (delayPos == delayBufferSize)
+            {
+                delayPos = 0;
+            }
+
+            channelData[i] = (drySample * (1.0f - mix)) + (delaySample * mix);
             channelData[i] *= gain;
         }
     }
+
+    delayBufferPos += buffer.getNumSamples();
+    if (delayBufferPos >= delayBufferSize)
+        delayBufferPos -= delayBufferSize;
 }
 
 //==============================================================================
@@ -201,12 +216,16 @@ void TurbulantAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // You should use this method to store your parameters in the memory block.
     // You could do that either as raw data, or use the XML or ValueTree classes
     // as intermediaries to make it easy to save and load complex data.
+    if (auto xmlState = state.copyState().createXml())
+        copyXmlToBinary(*xmlState, destData);
 }
 
 void TurbulantAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     // You should use this method to restore your parameters from this memory block,
     // whose contents will have been created by the getStateInformation() call.
+    if (auto xmlState = getXmlFromBinary(data, sizeInBytes))
+        state.replaceState(juce::ValueTree::fromXml(*xmlState));
 }
 
 //==============================================================================
